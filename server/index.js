@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 const { nanoid } = require('nanoid');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -45,6 +46,35 @@ function admin(req, res, next) {
 const bad = ['şiddet', 'silah', 'uyuşturucu', 'taciz', 'tehdit', 'dolandır', 'sahte kimlik', 'hack', 'hacking', 'spam', 'yasa dışı', 'yasadışı', 'porno', 'cinsel'];
 function checkTask(t) { const s = [t.title, t.description, t.city, t.category].join(' ').toLowerCase(); return bad.find(w => s.includes(w)); }
 function code6() { return String(Math.floor(100000 + Math.random() * 900000)); }
+
+function mailReady() {
+  return !!(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.MAIL_FROM);
+}
+async function sendMail(to, subject, html) {
+  if (!mailReady()) {
+    console.warn('SMTP ayarları eksik. Mail gönderilemedi:', { to, subject });
+    return false;
+  }
+  const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: String(process.env.SMTP_PORT) === '465',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+  });
+  const from = process.env.MAIL_FROM_NAME ? `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM}>` : process.env.MAIL_FROM;
+  await transporter.sendMail({ from, to, subject, html });
+  return true;
+}
+function codeMailHtml(title, code, note='') {
+  return `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:16px">
+    <h2 style="margin:0 0 12px;color:#111827">${title}</h2>
+    <p style="color:#374151">GörevPazar hesabın için doğrulama kodun:</p>
+    <div style="font-size:32px;font-weight:800;letter-spacing:8px;background:#f3f4f6;padding:18px;text-align:center;border-radius:12px;color:#111827">${code}</div>
+    ${note ? `<p style="color:#6b7280;margin-top:16px">${note}</p>` : ''}
+    <p style="color:#9ca3af;font-size:12px;margin-top:24px">Bu işlemi sen başlatmadıysan bu e-postayı yok sayabilirsin.</p>
+  </div>`;
+}
+
 
 async function init() {
   await run(`CREATE TABLE IF NOT EXISTS users(
@@ -98,8 +128,9 @@ app.post('/api/register', async (req, res) => {
     if (await get('SELECT id FROM users WHERE email=?', [email])) return res.status(409).json({ error: 'Bu e-posta zaten kayıtlı.' });
     const id = nanoid(), email_code = code6();
     await run('INSERT INTO users(id,name,email,password_hash,phone,email_code,email_verified) VALUES(?,?,?,?,?,?,0)', [id, name, email, bcrypt.hashSync(password, 10), phone, email_code]);
+    await sendMail(email, 'GörevPazar E-posta Doğrulama Kodu', codeMailHtml('E-posta doğrulama', email_code, 'Kodu sitedeki E-posta Doğrulama alanına gir.'));
     const u = await get('SELECT id,name,email,is_admin,balance,phone,email_verified,banned,rating_avg,rating_count FROM users WHERE id=?', [id]);
-    res.json({ token: tokenFor(u), user: u, verification_code: email_code, message: 'Kayıt başarılı. Demo doğrulama kodu ekranda gösterildi.' });
+    res.json({ token: tokenFor(u), user: u, message: 'Kayıt başarılı. Doğrulama kodu e-posta adresine gönderildi.' });
   } catch (e) { res.status(500).json({ error: 'Kayıt sırasında hata oluştu.' }); }
 });
 app.post('/api/login', async (req, res) => {
@@ -133,7 +164,8 @@ app.post('/api/forgot-password', async (req, res) => {
   const u = await get('SELECT id FROM users WHERE email=?', [email]);
   if (!u) return res.status(404).json({ error: 'Bu e-posta kayıtlı değil.' });
   const reset_code = code6(); await run('UPDATE users SET reset_code=? WHERE id=?', [reset_code, u.id]);
-  res.json({ message: 'Demo sıfırlama kodu oluşturuldu.', reset_code });
+  await sendMail(email, 'GörevPazar Şifre Sıfırlama Kodu', codeMailHtml('Şifre sıfırlama', reset_code, 'Kodu sitedeki Şifremi Unuttum ekranına girerek yeni şifreni belirle.'));
+  res.json({ message: 'Şifre sıfırlama kodu e-posta adresine gönderildi.' });
 });
 app.post('/api/reset-password', async (req, res) => {
   const email = (req.body.email || '').trim().toLowerCase();
@@ -145,8 +177,11 @@ app.post('/api/reset-password', async (req, res) => {
   res.json({ message: 'Şifre sıfırlandı. Yeni şifreyle giriş yapabilirsiniz.' });
 });
 app.post('/api/send-verification', auth, notBanned, async (req, res) => {
+  const u = await get('SELECT email FROM users WHERE id=?', [req.user.id]);
+  if (!u) return res.status(404).json({ error: 'Kullanıcı bulunamadı.' });
   const code = code6(); await run('UPDATE users SET email_code=? WHERE id=?', [code, req.user.id]);
-  res.json({ message: 'Demo doğrulama kodu oluşturuldu.', verification_code: code });
+  await sendMail(u.email, 'GörevPazar E-posta Doğrulama Kodu', codeMailHtml('E-posta doğrulama', code, 'Kodu sitedeki E-posta Doğrulama alanına gir.'));
+  res.json({ message: 'Doğrulama kodu e-posta adresine gönderildi.' });
 });
 app.post('/api/verify-email', auth, notBanned, async (req, res) => {
   const u = await get('SELECT email_code FROM users WHERE id=?', [req.user.id]);
