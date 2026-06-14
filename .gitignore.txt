@@ -1,0 +1,3 @@
+node_modules
+server/gorevpazar.db
+.env
