@@ -7,7 +7,7 @@ const jwt = require('jsonwebtoken');
 const sqlite3 = require('sqlite3').verbose();
 const { nanoid } = require('nanoid');
 const path = require('path');
-const nodemailer = require('nodemailer');
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -51,26 +51,40 @@ function mailReady() {
   return !!(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.MAIL_FROM);
 }
 async function sendMail(to, subject, html) {
-  if (!mailReady()) {
-    console.warn('SMTP ayarları eksik. Mail gönderilemedi:', { to, subject });
+  if (!process.env.BREVO_API_KEY || !process.env.MAIL_FROM) {
+    console.warn('Brevo API ayarları eksik.');
     return false;
   }
- const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 10000
-});
-  const from = process.env.MAIL_FROM_NAME ? `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM}>` : process.env.MAIL_FROM;
-  await transporter.sendMail({ from, to, subject, html });
+
+  const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': process.env.BREVO_API_KEY,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      sender: {
+        name: process.env.MAIL_FROM_NAME || 'GörevPazar',
+        email: process.env.MAIL_FROM
+      },
+      to: [
+        { email: to }
+      ],
+      subject,
+      htmlContent: html
+    })
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    console.error('Brevo API mail hatası:', text);
+    throw new Error('E-posta gönderilemedi.');
+  }
+
   return true;
 }
+
 function codeMailHtml(title, code, note='') {
   return `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:16px">
     <h2 style="margin:0 0 12px;color:#111827">${title}</h2>
