@@ -94,6 +94,16 @@ async function sendMail(to, subject, html) {
   return true;
 }
 
+
+async function notifyUser(userId, type, title, body, taskId = '') {
+  if (!userId) return;
+  try {
+    await run('INSERT INTO notifications(id,user_id,type,title,body,task_id) VALUES(?,?,?,?,?,?)', [nanoid(), userId, type, title, body, taskId || '']);
+  } catch (e) {
+    console.error('Bildirim oluşturulamadı:', e.message);
+  }
+}
+
 function codeMailHtml(title, code, note='') {
   return `<div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:24px;border:1px solid #e5e7eb;border-radius:16px">
     <h2 style="margin:0 0 12px;color:#111827">${title}</h2>
@@ -120,6 +130,7 @@ async function init() {
   await ensureColumn('users', 'banned', 'INTEGER DEFAULT 0');
   await ensureColumn('users', 'rating_avg', 'REAL DEFAULT 0');
   await ensureColumn('users', 'rating_count', 'INTEGER DEFAULT 0');
+  await ensureColumn('users', 'avatar_data', "TEXT DEFAULT ''");
 
   await run(`CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,owner_id TEXT,title TEXT,category TEXT,city TEXT,budget INTEGER,duration TEXT,description TEXT,status TEXT DEFAULT 'draft',assigned_to TEXT,payment_status TEXT DEFAULT 'unpaid',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await ensureColumn('tasks', 'task_type', "TEXT DEFAULT 'paid'");
@@ -136,6 +147,7 @@ async function init() {
   await run(`CREATE TABLE IF NOT EXISTS reviews(id TEXT PRIMARY KEY,task_id TEXT,reviewer_id TEXT,reviewed_id TEXT,rating INTEGER,comment TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await run(`CREATE TABLE IF NOT EXISTS support_tickets(id TEXT PRIMARY KEY,user_id TEXT,subject TEXT,message TEXT,status TEXT DEFAULT 'open',admin_reply TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await run(`CREATE TABLE IF NOT EXISTS balance_topups(id TEXT PRIMARY KEY,user_id TEXT,amount INTEGER,shopier_url TEXT,order_no TEXT DEFAULT '',note TEXT DEFAULT '',status TEXT DEFAULT 'pending',admin_note TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+  await run(`CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY,user_id TEXT,type TEXT,title TEXT,body TEXT,task_id TEXT DEFAULT '',is_read INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
 
   const a = await get('SELECT id FROM users WHERE email=?', ['admin@gorevpazar.com']);
   if (!a) await run('INSERT INTO users(id,name,email,password_hash,is_admin,balance,email_verified) VALUES(?,?,?,?,?,?,?)', ['u_admin', 'GörevPazar Admin', 'admin@gorevpazar.com', bcrypt.hashSync('admin123', 10), 1, 0, 1]);
@@ -163,7 +175,7 @@ app.post('/api/register', async (req, res) => {
     const id = nanoid(), email_code = code6();
     await run('INSERT INTO users(id,name,email,password_hash,phone,email_code,email_verified) VALUES(?,?,?,?,?,?,0)', [id, name, email, bcrypt.hashSync(password, 10), phone, email_code]);
     await sendMail(email, 'GörevPazar E-posta Doğrulama Kodu', codeMailHtml('E-posta doğrulama', email_code, 'Kodu sitedeki E-posta Doğrulama alanına gir.'));
-    const u = await get('SELECT id,name,email,is_admin,balance,phone,email_verified,banned,rating_avg,rating_count FROM users WHERE id=?', [id]);
+    const u = await get('SELECT id,name,email,is_admin,balance,phone,email_verified,banned,rating_avg,rating_count,avatar_data FROM users WHERE id=?', [id]);
     res.json({ token: tokenFor(u), user: u, message: 'Kayıt başarılı. Doğrulama kodu e-posta adresine gönderildi.' });
   } catch (e) { res.status(500).json({ error: 'Kayıt sırasında hata oluştu.' }); }
 });
@@ -174,15 +186,22 @@ app.post('/api/login', async (req, res) => {
     if (!u) return res.status(404).json({ error: 'Bu e-posta kayıtlı değil. Önce kayıt olun.' });
     if (u.banned) return res.status(403).json({ error: 'Hesabınız admin tarafından banlandı.' });
     if (!bcrypt.compareSync(password || '', u.password_hash)) return res.status(401).json({ error: 'Şifre hatalı.' });
-    res.json({ token: tokenFor(u), user: { id: u.id, name: u.name, email: u.email, is_admin: u.is_admin, balance: u.balance, phone: u.phone, email_verified: u.email_verified, rating_avg: u.rating_avg, rating_count: u.rating_count } });
+    res.json({ token: tokenFor(u), user: { id: u.id, name: u.name, email: u.email, is_admin: u.is_admin, balance: u.balance, phone: u.phone, email_verified: u.email_verified, rating_avg: u.rating_avg, rating_count: u.rating_count, avatar_data: u.avatar_data } });
   } catch { res.status(500).json({ error: 'Giriş sırasında hata oluştu.' }); }
 });
 app.get('/api/me', auth, async (req, res) => {
-  const u = await get('SELECT id,name,email,is_admin,balance,phone,email_verified,banned,rating_avg,rating_count FROM users WHERE id=?', [req.user.id]);
+  const u = await get('SELECT id,name,email,is_admin,balance,phone,email_verified,banned,rating_avg,rating_count,avatar_data FROM users WHERE id=?', [req.user.id]);
+  if (u) {
+    const n = await get('SELECT COUNT(*) c FROM notifications WHERE user_id=? AND is_read=0', [req.user.id]);
+    u.unread_count = n ? n.c : 0;
+  }
   res.json(u);
 });
 app.post('/api/profile', auth, notBanned, async (req, res) => {
-  await run('UPDATE users SET name=?, phone=? WHERE id=?', [req.body.name || '', req.body.phone || '', req.user.id]);
+  const avatar = req.body.avatar_data || '';
+  if (avatar && !String(avatar).startsWith('data:image/')) return res.status(400).json({ error: 'Profil fotoğrafı sadece görsel olabilir.' });
+  if (avatar && avatar.length > 2 * 1024 * 1024) return res.status(413).json({ error: 'Profil fotoğrafı çok büyük. 1 MB altı bir görsel seç.' });
+  await run('UPDATE users SET name=?, phone=?, avatar_data=? WHERE id=?', [req.body.name || '', req.body.phone || '', avatar, req.user.id]);
   res.json({ message: 'Profil güncellendi.' });
 });
 app.post('/api/change-password', auth, notBanned, async (req, res) => {
@@ -275,6 +294,7 @@ app.post('/api/tasks/:id/apply', auth, notBanned, async (req, res) => {
   }
   if (await get('SELECT id FROM applications WHERE task_id=? AND user_id=?', [t.id, req.user.id])) return res.status(409).json({ error: 'Bu göreve zaten başvurdun.' });
   await run('INSERT INTO applications(id,task_id,user_id,message) VALUES(?,?,?,?)', [nanoid(), t.id, req.user.id, req.body.message || 'Göreve talibim.']);
+  await notifyUser(t.owner_id, 'application', 'Yeni başvuru geldi', `${t.title} görevine yeni başvuru var.`, t.id);
   res.json({ message: 'Başvurun gönderildi.' });
 });
 app.post('/api/applications/:id/accept', auth, notBanned, async (req, res) => {
@@ -284,6 +304,7 @@ app.post('/api/applications/:id/accept', auth, notBanned, async (req, res) => {
   await run('UPDATE applications SET status="accepted" WHERE id=?', [a.id]);
   await run('UPDATE applications SET status="rejected" WHERE task_id=? AND id!=?', [a.task_id, a.id]);
   await run('UPDATE tasks SET assigned_to=?, status="in_progress" WHERE id=?', [a.user_id, a.task_id]);
+  await notifyUser(a.user_id, 'application_accepted', 'Başvurun kabul edildi', 'Bir görev için başvurun kabul edildi. Teslim sürecine geçebilirsin.', a.task_id);
   res.json({ message: 'Başvuru kabul edildi. Görev devam ediyor.' });
 });
 app.post('/api/tasks/:id/submit', auth, notBanned, async (req, res) => {
@@ -292,6 +313,7 @@ app.post('/api/tasks/:id/submit', auth, notBanned, async (req, res) => {
   if (t.assigned_to !== req.user.id) return res.status(403).json({ error: 'Bu görev sana atanmadı.' });
   await run('INSERT INTO submissions(id,task_id,user_id,note,proof,file_name,file_data) VALUES(?,?,?,?,?,?,?)', [nanoid(), t.id, req.user.id, req.body.note || '', req.body.proof || '', req.body.file_name || '', req.body.file_data || '']);
   await run('UPDATE tasks SET status="submitted" WHERE id=?', [t.id]);
+  await notifyUser(t.owner_id, 'submission', 'Yeni teslim geldi', `${t.title} görevi için teslim gönderildi.`, t.id);
   res.json({ message: 'Teslim gönderildi. Görev sahibinin onayı bekleniyor.' });
 });
 app.post('/api/tasks/:id/approve', auth, notBanned, async (req, res) => {
@@ -300,23 +322,27 @@ app.post('/api/tasks/:id/approve', auth, notBanned, async (req, res) => {
   if (t.owner_id !== req.user.id && !req.user.is_admin) return res.status(403).json({ error: 'Sadece görev sahibi veya admin onaylayabilir.' });
   if (t.task_type === 'free' || t.payment_status === 'free') {
     await run('UPDATE tasks SET status="completed", payment_status="free_completed" WHERE id=?', [t.id]);
+    await notifyUser(t.assigned_to, 'task_completed', 'Görev tamamlandı', `${t.title} görevi onaylandı ve tamamlandı.`, t.id);
     return res.json({ message: 'Ücretsiz görev onaylandı ve tamamlandı.' });
   }
   const commission = Math.round(t.budget * 0.15), payout = t.budget - commission;
   await run('UPDATE users SET balance=balance+? WHERE id=?', [payout, t.assigned_to]);
   await run('UPDATE tasks SET status="completed", payment_status="released" WHERE id=?', [t.id]);
+  await notifyUser(t.assigned_to, 'task_completed', 'Görev onaylandı', `${t.title} görevi onaylandı. ${payout} TL bakiyene aktarıldı.`, t.id);
   res.json({ message: `Görev onaylandı. ${payout} TL görev yapana aktarıldı.` });
 });
 app.post('/api/tasks/:id/revision', auth, notBanned, async (req, res) => {
   const t = await get('SELECT * FROM tasks WHERE id=?', [req.params.id]);
   if (!t || t.owner_id !== req.user.id) return res.status(403).json({ error: 'Yetki yok.' });
   await run('UPDATE tasks SET status="in_progress" WHERE id=?', [t.id]);
+  await notifyUser(t.assigned_to, 'revision', 'Revizyon istendi', `${t.title} görevi için revizyon istendi.`, t.id);
   res.json({ message: 'Revizyon istendi. Görev yeniden devam ediyor.' });
 });
 app.post('/api/tasks/:id/dispute', auth, notBanned, async (req, res) => {
   const t = await get('SELECT * FROM tasks WHERE id=?', [req.params.id]);
   if (!t || (t.owner_id !== req.user.id && t.assigned_to !== req.user.id)) return res.status(403).json({ error: 'Yetki yok.' });
   await run('UPDATE tasks SET status="dispute" WHERE id=?', [t.id]);
+  await notifyUser(t.owner_id === req.user.id ? t.assigned_to : t.owner_id, 'dispute', 'Uyuşmazlık açıldı', `${t.title} görevi için uyuşmazlık açıldı.`, t.id);
   res.json({ message: 'Uyuşmazlık açıldı. Admin inceleyecek.' });
 });
 app.post('/api/reviews', auth, notBanned, async (req, res) => {
@@ -329,6 +355,7 @@ app.post('/api/reviews', auth, notBanned, async (req, res) => {
   await run('INSERT INTO reviews(id,task_id,reviewer_id,reviewed_id,rating,comment) VALUES(?,?,?,?,?,?)', [nanoid(), task_id, req.user.id, reviewed_id, r, comment || '']);
   const avg = await get('SELECT AVG(rating) avg, COUNT(*) c FROM reviews WHERE reviewed_id=?', [reviewed_id]);
   await run('UPDATE users SET rating_avg=?, rating_count=? WHERE id=?', [avg.avg || 0, avg.c || 0, reviewed_id]);
+  await notifyUser(reviewed_id, 'review', 'Yeni yorum aldın', 'Tamamlanan bir görevden yeni puan ve yorum aldın.', task_id);
   res.json({ message: 'Yorum ve puan kaydedildi.' });
 });
 
@@ -343,6 +370,8 @@ app.post('/api/topups', auth, notBanned, async (req, res) => {
   const recent = await get(`SELECT id FROM balance_topups WHERE user_id=? AND amount=? AND status='pending' AND datetime(created_at) > datetime('now','-30 minutes')`, [req.user.id, amount]);
   if (recent) return res.status(429).json({ error: 'Bu tutar için bekleyen bildiriminiz var. Admin onayı bekleyin.' });
   await run('INSERT INTO balance_topups(id,user_id,amount,shopier_url,order_no,note) VALUES(?,?,?,?,?,?)', [nanoid(), req.user.id, amount, opt.url, req.body.order_no || '', req.body.note || '']);
+  const admins = await all('SELECT id FROM users WHERE is_admin=1');
+  for (const adm of admins) await notifyUser(adm.id, 'topup_pending', 'Yeni bakiye bildirimi', `${amount} TL Shopier ödeme bildirimi geldi.`, '');
   res.json({ message: 'Ödeme bildirimi alındı. Shopier ödemeniz admin tarafından kontrol edilince bakiyeniz eklenecek.' });
 });
 app.post('/api/payments/balance/pay', auth, notBanned, async (req, res) => {
@@ -368,6 +397,16 @@ app.post('/api/payments/paytr/create', auth, notBanned, async (req, res) => {
   await run('UPDATE tasks SET status="open", payment_status="funded" WHERE id=?', [t.id]);
   res.json({ demo: true, message: 'Demo ödeme başarılı. PayTR bilgileri eklenince canlı ödeme açılır.' });
 });
+
+app.get('/api/notifications', auth, async (req, res) => {
+  res.json(await all('SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50', [req.user.id]));
+});
+app.post('/api/notifications/read', auth, async (req, res) => {
+  if (req.body.id) await run('UPDATE notifications SET is_read=1 WHERE id=? AND user_id=?', [req.body.id, req.user.id]);
+  else await run('UPDATE notifications SET is_read=1 WHERE user_id=?', [req.user.id]);
+  res.json({ message: 'Bildirimler okundu.' });
+});
+
 app.get('/api/dashboard', auth, async (req, res) => {
   const owned = await all('SELECT * FROM tasks WHERE owner_id=? ORDER BY created_at DESC', [req.user.id]);
   const assigned = await all('SELECT * FROM tasks WHERE assigned_to=? ORDER BY created_at DESC', [req.user.id]);
@@ -376,7 +415,8 @@ app.get('/api/dashboard', auth, async (req, res) => {
   const tickets = await all('SELECT * FROM support_tickets WHERE user_id=? ORDER BY created_at DESC', [req.user.id]);
   const topups = await all('SELECT * FROM balance_topups WHERE user_id=? ORDER BY created_at DESC', [req.user.id]);
   const messages = await all('SELECT m.*, t.title task_title, s.name sender_name, r.name receiver_name FROM messages m JOIN tasks t ON t.id=m.task_id JOIN users s ON s.id=m.sender_id JOIN users r ON r.id=m.receiver_id WHERE m.sender_id=? OR m.receiver_id=? ORDER BY m.created_at DESC', [req.user.id, req.user.id]);
-  res.json({ owned, assigned, apps, withdrawals, tickets, topups, messages });
+  const notifications = await all('SELECT * FROM notifications WHERE user_id=? ORDER BY created_at DESC LIMIT 50', [req.user.id]);
+  res.json({ owned, assigned, apps, withdrawals, tickets, topups, messages, notifications });
 });
 app.post('/api/withdrawals', auth, notBanned, async (req, res) => {
   const amount = parseInt(req.body.amount || 0); const { full_name, iban } = req.body;
@@ -395,11 +435,14 @@ app.post('/api/messages', auth, notBanned, async (req, res) => {
   if (!t || ![t.owner_id, t.assigned_to].includes(req.user.id) || ![t.owner_id, t.assigned_to].includes(receiver_id)) return res.status(403).json({ error: 'Mesaj için görev sahibi veya görevli olmalısın.' });
   if (!body) return res.status(400).json({ error: 'Mesaj boş olamaz.' });
   await run('INSERT INTO messages(id,task_id,sender_id,receiver_id,body) VALUES(?,?,?,?,?)', [nanoid(), task_id, req.user.id, receiver_id, body]);
+  await notifyUser(receiver_id, 'message', 'Yeni mesaj geldi', `Bir görev için yeni mesajın var.`, task_id);
   res.json({ message: 'Mesaj gönderildi.' });
 });
 app.post('/api/support', auth, notBanned, async (req, res) => {
   if (!req.body.subject || !req.body.message) return res.status(400).json({ error: 'Konu ve mesaj gerekli.' });
   await run('INSERT INTO support_tickets(id,user_id,subject,message) VALUES(?,?,?,?)', [nanoid(), req.user.id, req.body.subject, req.body.message]);
+  const admins = await all('SELECT id FROM users WHERE is_admin=1');
+  for (const adm of admins) await notifyUser(adm.id, 'support', 'Yeni destek talebi', req.body.subject, '');
   res.json({ message: 'Destek talebi gönderildi.' });
 });
 
@@ -416,6 +459,7 @@ app.post('/api/admin/topups/:id', auth, admin, async (req, res) => {
   const status = req.body.status === 'approved' ? 'approved' : 'rejected';
   if (status === 'approved') await run('UPDATE users SET balance=balance+? WHERE id=?', [topup.amount, topup.user_id]);
   await run('UPDATE balance_topups SET status=?,admin_note=? WHERE id=?', [status, req.body.admin_note || '', topup.id]);
+  await notifyUser(topup.user_id, 'topup_result', status === 'approved' ? 'Bakiye yüklendi' : 'Bakiye bildirimi reddedildi', status === 'approved' ? `${topup.amount} TL bakiyene eklendi.` : 'Shopier bakiye bildirimin reddedildi.', '');
   res.json({ message: status === 'approved' ? `${topup.amount} TL kullanıcı bakiyesine eklendi.` : 'Bakiye bildirimi reddedildi.' });
 });
 app.post('/api/admin/users/:id/ban', auth, admin, async (req, res) => { await run('UPDATE users SET banned=? WHERE id=?', [req.body.banned ? 1 : 0, req.params.id]); res.json({ message: req.body.banned ? 'Kullanıcı banlandı.' : 'Ban kaldırıldı.' }); });
@@ -426,9 +470,10 @@ app.post('/api/admin/withdrawals/:id', auth, admin, async (req, res) => {
   const status = req.body.status;
   if (w.status === 'pending' && status === 'rejected') await run('UPDATE users SET balance=balance+? WHERE id=?', [w.amount, w.user_id]);
   await run('UPDATE withdrawals SET status=?,admin_note=? WHERE id=?', [status, req.body.admin_note || '', w.id]);
+  await notifyUser(w.user_id, 'withdrawal', 'Para çekme talebin güncellendi', `Para çekme talebinin durumu: ${status}`, '');
   res.json({ message: 'Çekim talebi güncellendi.' });
 });
-app.post('/api/admin/tickets/:id/reply', auth, admin, async (req, res) => { await run('UPDATE support_tickets SET admin_reply=?,status=? WHERE id=?', [req.body.reply || '', req.body.status || 'answered', req.params.id]); res.json({ message: 'Destek talebi cevaplandı.' }); });
+app.post('/api/admin/tickets/:id/reply', auth, admin, async (req, res) => { const ticket = await get('SELECT * FROM support_tickets WHERE id=?', [req.params.id]); await run('UPDATE support_tickets SET admin_reply=?,status=? WHERE id=?', [req.body.reply || '', req.body.status || 'answered', req.params.id]); if (ticket) await notifyUser(ticket.user_id, 'support_reply', 'Destek talebine cevap geldi', ticket.subject || 'Destek talebi', ''); res.json({ message: 'Destek talebi cevaplandı.' }); });
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
 
 init().then(() => app.listen(PORT, () => console.log(`GörevPazar Full çalışıyor: http://localhost:${PORT}`)));

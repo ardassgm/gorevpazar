@@ -32,3 +32,14 @@
 .topup-card button{width:100%;margin:6px 0;text-align:center}
 @media(max-width:900px){.topup-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:560px){.topup-grid{grid-template-columns:1fr}}
+
+/* Profil fotoğrafı ve bildirim sistemi */
+.nav-avatar,.avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--p),var(--c));color:#fff;font-weight:950;vertical-align:middle;margin-right:6px}
+.avatar-big{width:74px;height:74px;border-radius:50%;object-fit:cover;display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--p),var(--c));font-size:30px;font-weight:950;margin:0 auto 10px}
+.avatar-xl{width:112px;height:112px;border-radius:50%;object-fit:cover;display:inline-flex;align-items:center;justify-content:center;background:linear-gradient(135deg,var(--p),var(--c));font-size:46px;font-weight:950;margin-bottom:10px}
+.profile-mini{text-align:center}
+.profile-photo-box{display:grid;place-items:center;gap:8px;margin-bottom:14px;color:var(--muted)}
+.notif-dot{display:inline-flex;min-width:22px;height:22px;border-radius:99px;align-items:center;justify-content:center;background:var(--danger);color:#fff;font-size:12px;font-weight:950;padding:0 7px;margin-left:4px}
+.notif{border-left:4px solid transparent;margin:10px 0}
+.notif.unread{border-left-color:var(--c);background:linear-gradient(145deg,rgba(17,200,255,.12),rgba(255,255,255,.03))}
+.notif small{color:var(--muted)}
