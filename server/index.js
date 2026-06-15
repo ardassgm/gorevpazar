@@ -154,9 +154,9 @@ async function init() {
   const count = await get('SELECT COUNT(*) c FROM tasks');
   if (count.c === 0) {
     const samples = [
-      ['Elazığ merkezde mağaza vitrini fotoğrafı çekilecek', 'Fotoğraf & Video', 'Elazığ', 250, '2 saat', 'Konuma gidip 5 net fotoğraf çekilecek. Teslim sonrası ödeme serbest bırakılır.'],
-      ['Instagram gönderime gerçek kullanıcı yorumu yap', 'Sosyal Medya', 'Online', 150, '1 gün', 'Marka kurallarına uygun, spam olmayan doğal yorum yapılacak.'],
-      ['Ürün araştırması ve fiyat karşılaştırması yapılacak', 'Araştırma', 'Online', 300, '3 saat', '3 farklı siteden fiyat karşılaştırması ve kısa rapor isteniyor.']
+      ['Instagram gönderisine doğal yorum yapılacak', 'Sosyal Medya', 'Online', 0.25, '5 dakika', 'Paylaşılan gönderiye spam olmayan, doğal ve düzgün bir yorum yapılacaktır.'],
+      ['Kısa anket doldurulacak', 'Araştırma', 'Online', 0.50, '10 dakika', 'Kısa kullanıcı deneyimi anketi dikkatli şekilde doldurulacaktır.'],
+      ['Ürün fiyat araştırması yapılacak', 'Araştırma', 'Online', 2, '30 dakika', 'Belirtilen ürün için 3 farklı siteden fiyat karşılaştırması yapılacaktır.']
     ];
     for (const x of samples) await run('INSERT INTO tasks(id,owner_id,title,category,city,budget,duration,description,status,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?)', [nanoid(), 'u_admin', ...x, 'open', 'funded']);
   }
@@ -263,9 +263,9 @@ app.post('/api/tasks', auth, notBanned, async (req, res) => {
   if (badword) return res.status(400).json({ error: `Bu görev yayınlanamaz. Yasaklı içerik algılandı: ${badword}` });
 
   const taskType = b.task_type === 'free' ? 'free' : 'paid';
-  const budget = taskType === 'free' ? 0 : parseInt(b.budget || 0);
+  const budget = taskType === 'free' ? 0 : Number(String(b.budget || '0').replace(',', '.'));
   if (!b.title || !b.description) return res.status(400).json({ error: 'Başlık ve açıklama zorunlu.' });
-  if (taskType === 'paid' && (!budget || budget < 50)) return res.status(400).json({ error: 'Ücretli görev için en az 50 TL bütçe girmelisiniz.' });
+  if (taskType === 'paid' && (!budget || budget < 0.25)) return res.status(400).json({ error: 'Ücretli görev için en az 0,25 TL bütçe girmelisiniz.' });
 
   if (taskType === 'free' && !req.user.is_admin) {
   const today = await get(`SELECT COUNT(*) c FROM tasks WHERE owner_id=? AND task_type='free' AND date(created_at)=date('now','localtime')`, [req.user.id]);
@@ -330,7 +330,7 @@ app.post('/api/tasks/:id/approve', auth, notBanned, async (req, res) => {
     await notifyUser(t.assigned_to, 'task_completed', 'Görev tamamlandı', `${t.title} görevi onaylandı ve tamamlandı.`, t.id);
     return res.json({ message: 'Ücretsiz görev onaylandı ve tamamlandı.' });
   }
-  const commission = Math.round(t.budget * 0.15), payout = t.budget - commission;
+  const commission = Math.round(t.budget * 0.15 * 100) / 100, payout = Math.round((t.budget - commission) * 100) / 100;
   await run('UPDATE users SET balance=balance+? WHERE id=?', [payout, t.assigned_to]);
   await run('UPDATE tasks SET status="completed", payment_status="released" WHERE id=?', [t.id]);
   await notifyUser(t.assigned_to, 'task_completed', 'Görev onaylandı', `${t.title} görevi onaylandı. ${payout} TL bakiyene aktarıldı.`, t.id);

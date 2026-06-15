@@ -43,3 +43,11 @@
 .notif{border-left:4px solid transparent;margin:10px 0}
 .notif.unread{border-left-color:var(--c);background:linear-gradient(145deg,rgba(17,200,255,.12),rgba(255,255,255,.03))}
 .notif small{color:var(--muted)}
+
+/* Mikro görev fiyat bilgileri */
+.pricing-note,.micro-info{display:grid;gap:8px;background:linear-gradient(135deg,rgba(37,99,235,.10),rgba(124,58,237,.10));border:1px solid rgba(37,99,235,.18);border-radius:18px;padding:16px;margin:12px 0}
+.pricing-note span,.micro-info span{display:inline-flex;align-items:center;gap:8px;background:rgba(255,255,255,.75);border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:8px 10px}
+.quick-budget{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.quick-budget button{padding:8px 10px;border-radius:999px;border:1px solid rgba(37,99,235,.25);background:#fff;cursor:pointer;font-weight:700}
+.quick-budget button:hover{transform:translateY(-1px)}
+.budget-wrap{display:block}
