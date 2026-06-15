@@ -13,10 +13,19 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'dev_secret_change_me';
 
+const SHOPIER_TOPUP_OPTIONS = [
+  { amount: 50, url: 'https://www.shopier.com/dijitaliinzirvesi/48079223' },
+  { amount: 100, url: 'https://www.shopier.com/dijitaliinzirvesi/48079399' },
+  { amount: 150, url: 'https://www.shopier.com/dijitaliinzirvesi/48079435' },
+  { amount: 250, url: 'https://www.shopier.com/dijitaliinzirvesi/48079457' },
+  { amount: 350, url: 'https://www.shopier.com/dijitaliinzirvesi/48079484' },
+  { amount: 500, url: 'https://www.shopier.com/dijitaliinzirvesi/48079507' }
+];
+
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '30mb' }));
+app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 app.use(express.static(path.join(__dirname, '../public')));
 
 const db = new sqlite3.Database(path.join(__dirname, 'gorevpazar.db'));
@@ -113,6 +122,10 @@ async function init() {
   await ensureColumn('users', 'rating_count', 'INTEGER DEFAULT 0');
 
   await run(`CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,owner_id TEXT,title TEXT,category TEXT,city TEXT,budget INTEGER,duration TEXT,description TEXT,status TEXT DEFAULT 'draft',assigned_to TEXT,payment_status TEXT DEFAULT 'unpaid',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+  await ensureColumn('tasks', 'task_type', "TEXT DEFAULT 'paid'");
+  await ensureColumn('tasks', 'media_name', "TEXT DEFAULT ''");
+  await ensureColumn('tasks', 'media_type', "TEXT DEFAULT ''");
+  await ensureColumn('tasks', 'media_data', "TEXT DEFAULT ''");
   await run(`CREATE TABLE IF NOT EXISTS applications(id TEXT PRIMARY KEY,task_id TEXT,user_id TEXT,message TEXT,status TEXT DEFAULT 'pending',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await run(`CREATE TABLE IF NOT EXISTS submissions(id TEXT PRIMARY KEY,task_id TEXT,user_id TEXT,note TEXT,proof TEXT,file_name TEXT DEFAULT '',file_data TEXT DEFAULT '',status TEXT DEFAULT 'pending',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await ensureColumn('submissions', 'file_name', "TEXT DEFAULT ''");
@@ -122,6 +135,7 @@ async function init() {
   await run(`CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY,task_id TEXT,sender_id TEXT,receiver_id TEXT,body TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await run(`CREATE TABLE IF NOT EXISTS reviews(id TEXT PRIMARY KEY,task_id TEXT,reviewer_id TEXT,reviewed_id TEXT,rating INTEGER,comment TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
   await run(`CREATE TABLE IF NOT EXISTS support_tickets(id TEXT PRIMARY KEY,user_id TEXT,subject TEXT,message TEXT,status TEXT DEFAULT 'open',admin_reply TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+  await run(`CREATE TABLE IF NOT EXISTS balance_topups(id TEXT PRIMARY KEY,user_id TEXT,amount INTEGER,shopier_url TEXT,order_no TEXT DEFAULT '',note TEXT DEFAULT '',status TEXT DEFAULT 'pending',admin_note TEXT DEFAULT '',created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
 
   const a = await get('SELECT id FROM users WHERE email=?', ['admin@gorevpazar.com']);
   if (!a) await run('INSERT INTO users(id,name,email,password_hash,is_admin,balance,email_verified) VALUES(?,?,?,?,?,?,?)', ['u_admin', 'GörevPazar Admin', 'admin@gorevpazar.com', bcrypt.hashSync('admin123', 10), 1, 0, 1]);
@@ -228,16 +242,37 @@ app.post('/api/tasks', auth, notBanned, async (req, res) => {
   if (!u.email_verified) return res.status(403).json({ error: 'Görev açmak için önce e-postanı doğrula.' });
   const b = req.body; const badword = checkTask(b);
   if (badword) return res.status(400).json({ error: `Bu görev yayınlanamaz. Yasaklı içerik algılandı: ${badword}` });
-  if (!b.title || !b.budget || !b.description) return res.status(400).json({ error: 'Başlık, bütçe ve açıklama zorunlu.' });
+
+  const taskType = b.task_type === 'free' ? 'free' : 'paid';
+  const budget = taskType === 'free' ? 0 : parseInt(b.budget || 0);
+  if (!b.title || !b.description) return res.status(400).json({ error: 'Başlık ve açıklama zorunlu.' });
+  if (taskType === 'paid' && (!budget || budget < 50)) return res.status(400).json({ error: 'Ücretli görev için en az 50 TL bütçe girmelisiniz.' });
+
+  if (taskType === 'free') {
+    const today = await get(`SELECT COUNT(*) c FROM tasks WHERE owner_id=? AND task_type='free' AND date(created_at)=date('now','localtime')`, [req.user.id]);
+    if (today.c >= 1) return res.status(429).json({ error: 'Bugün ücretsiz görev oluşturma hakkınızı kullandınız. Yeni ücretsiz görev açmak için yarını bekleyebilir veya ücretli görev oluşturabilirsiniz.' });
+  }
+
+  const mediaData = b.media_data || '';
+  if (mediaData && mediaData.length > 25 * 1024 * 1024) return res.status(413).json({ error: 'Medya dosyası çok büyük. Maksimum yaklaşık 18 MB dosya yükleyebilirsiniz.' });
+  const mediaType = (b.media_type || '').startsWith('image/') || (b.media_type || '').startsWith('video/') ? b.media_type : '';
+  const mediaName = mediaType ? (b.media_name || '') : '';
+
   const id = nanoid();
-  await run('INSERT INTO tasks(id,owner_id,title,category,city,budget,duration,description,status,payment_status) VALUES(?,?,?,?,?,?,?,?,?,?)', [id, req.user.id, b.title, b.category || 'Diğer', b.city || 'Online', parseInt(b.budget), b.duration || 'Belirtilmedi', b.description, 'pending_payment', 'unpaid']);
-  res.json({ id, message: 'Görev oluşturuldu. Yayın için ödeme adımına geçin.' });
+  const status = taskType === 'free' ? 'open' : 'pending_payment';
+  const paymentStatus = taskType === 'free' ? 'free' : 'unpaid';
+  await run('INSERT INTO tasks(id,owner_id,title,category,city,budget,duration,description,status,payment_status,task_type,media_name,media_type,media_data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [id, req.user.id, b.title, b.category || 'Diğer', b.city || 'Online', budget, b.duration || 'Belirtilmedi', b.description, status, paymentStatus, taskType, mediaName, mediaType, mediaType ? mediaData : '']);
+  res.json({ id, task_type: taskType, message: taskType === 'free' ? 'Ücretsiz görev yayınlandı.' : 'Görev oluşturuldu. Yayın için ödeme adımına geçin.' });
 });
 app.post('/api/tasks/:id/apply', auth, notBanned, async (req, res) => {
   const t = await get('SELECT * FROM tasks WHERE id=?', [req.params.id]);
   if (!t) return res.status(404).json({ error: 'Görev bulunamadı.' });
   if (t.owner_id === req.user.id) return res.status(400).json({ error: 'Kendi görevine başvuramazsın.' });
   if (t.status !== 'open') return res.status(400).json({ error: 'Bu görev şu anda başvuru almıyor.' });
+  if (t.task_type === 'free') {
+    const apps = await get('SELECT COUNT(*) c FROM applications WHERE task_id=?', [t.id]);
+    if (apps.c >= 5) return res.status(400).json({ error: 'Ücretsiz görevlerde en fazla 5 başvuru alınabilir. Görev sahibi daha fazla başvuru için ücretli görev açabilir.' });
+  }
   if (await get('SELECT id FROM applications WHERE task_id=? AND user_id=?', [t.id, req.user.id])) return res.status(409).json({ error: 'Bu göreve zaten başvurdun.' });
   await run('INSERT INTO applications(id,task_id,user_id,message) VALUES(?,?,?,?)', [nanoid(), t.id, req.user.id, req.body.message || 'Göreve talibim.']);
   res.json({ message: 'Başvurun gönderildi.' });
@@ -263,6 +298,10 @@ app.post('/api/tasks/:id/approve', auth, notBanned, async (req, res) => {
   const t = await get('SELECT * FROM tasks WHERE id=?', [req.params.id]);
   if (!t) return res.status(404).json({ error: 'Görev bulunamadı.' });
   if (t.owner_id !== req.user.id && !req.user.is_admin) return res.status(403).json({ error: 'Sadece görev sahibi veya admin onaylayabilir.' });
+  if (t.task_type === 'free' || t.payment_status === 'free') {
+    await run('UPDATE tasks SET status="completed", payment_status="free_completed" WHERE id=?', [t.id]);
+    return res.json({ message: 'Ücretsiz görev onaylandı ve tamamlandı.' });
+  }
   const commission = Math.round(t.budget * 0.15), payout = t.budget - commission;
   await run('UPDATE users SET balance=balance+? WHERE id=?', [payout, t.assigned_to]);
   await run('UPDATE tasks SET status="completed", payment_status="released" WHERE id=?', [t.id]);
@@ -293,9 +332,38 @@ app.post('/api/reviews', auth, notBanned, async (req, res) => {
   res.json({ message: 'Yorum ve puan kaydedildi.' });
 });
 
+
+app.get('/api/topup-options', auth, (req, res) => {
+  res.json(SHOPIER_TOPUP_OPTIONS);
+});
+app.post('/api/topups', auth, notBanned, async (req, res) => {
+  const amount = parseInt(req.body.amount || 0);
+  const opt = SHOPIER_TOPUP_OPTIONS.find(o => o.amount === amount);
+  if (!opt) return res.status(400).json({ error: 'Geçersiz bakiye paketi.' });
+  const recent = await get(`SELECT id FROM balance_topups WHERE user_id=? AND amount=? AND status='pending' AND datetime(created_at) > datetime('now','-30 minutes')`, [req.user.id, amount]);
+  if (recent) return res.status(429).json({ error: 'Bu tutar için bekleyen bildiriminiz var. Admin onayı bekleyin.' });
+  await run('INSERT INTO balance_topups(id,user_id,amount,shopier_url,order_no,note) VALUES(?,?,?,?,?,?)', [nanoid(), req.user.id, amount, opt.url, req.body.order_no || '', req.body.note || '']);
+  res.json({ message: 'Ödeme bildirimi alındı. Shopier ödemeniz admin tarafından kontrol edilince bakiyeniz eklenecek.' });
+});
+app.post('/api/payments/balance/pay', auth, notBanned, async (req, res) => {
+  const { task_id } = req.body;
+  const t = await get('SELECT * FROM tasks WHERE id=? AND owner_id=?', [task_id, req.user.id]);
+  if (!t) return res.status(404).json({ error: 'Görev bulunamadı.' });
+  if (t.task_type === 'free' || t.payment_status === 'free') return res.status(400).json({ error: 'Ücretsiz görev için ödeme gerekmez.' });
+  if (t.status !== 'pending_payment') return res.status(400).json({ error: 'Bu görev için ödeme beklenmiyor.' });
+  const u = await get('SELECT balance FROM users WHERE id=?', [req.user.id]);
+  if (!u || u.balance < t.budget) return res.status(400).json({ error: `Yetersiz bakiye. Gerekli tutar: ${t.budget} TL. Önce Shopier ile bakiye yükleyin.` });
+  const pid = nanoid();
+  await run('UPDATE users SET balance=balance-? WHERE id=?', [t.budget, req.user.id]);
+  await run('INSERT INTO payments(id,task_id,user_id,amount,status,provider) VALUES(?,?,?,?,?,?)', [pid, t.id, req.user.id, t.budget, 'paid', 'balance_shopier']);
+  await run('UPDATE tasks SET status="open", payment_status="funded" WHERE id=?', [t.id]);
+  res.json({ message: `${t.budget} TL bakiyenden düşüldü. Görev yayınlandı.` });
+});
+
 app.post('/api/payments/paytr/create', auth, notBanned, async (req, res) => {
   const { task_id } = req.body; const t = await get('SELECT * FROM tasks WHERE id=? AND owner_id=?', [task_id, req.user.id]);
   if (!t) return res.status(404).json({ error: 'Görev bulunamadı.' });
+  if (t.task_type === 'free' || t.payment_status === 'free') return res.status(400).json({ error: 'Ücretsiz görev için ödeme gerekmez.' });
   const pid = nanoid(); await run('INSERT INTO payments(id,task_id,user_id,amount,status,provider) VALUES(?,?,?,?,?,?)', [pid, t.id, req.user.id, t.budget, 'paid', 'demo']);
   await run('UPDATE tasks SET status="open", payment_status="funded" WHERE id=?', [t.id]);
   res.json({ demo: true, message: 'Demo ödeme başarılı. PayTR bilgileri eklenince canlı ödeme açılır.' });
@@ -303,11 +371,12 @@ app.post('/api/payments/paytr/create', auth, notBanned, async (req, res) => {
 app.get('/api/dashboard', auth, async (req, res) => {
   const owned = await all('SELECT * FROM tasks WHERE owner_id=? ORDER BY created_at DESC', [req.user.id]);
   const assigned = await all('SELECT * FROM tasks WHERE assigned_to=? ORDER BY created_at DESC', [req.user.id]);
-  const apps = await all('SELECT a.*,t.title,t.budget,t.id task_id FROM applications a JOIN tasks t ON t.id=a.task_id WHERE a.user_id=? ORDER BY a.created_at DESC', [req.user.id]);
+  const apps = await all('SELECT a.*,t.title,t.budget,t.task_type,t.payment_status,t.id task_id FROM applications a JOIN tasks t ON t.id=a.task_id WHERE a.user_id=? ORDER BY a.created_at DESC', [req.user.id]);
   const withdrawals = await all('SELECT * FROM withdrawals WHERE user_id=? ORDER BY created_at DESC', [req.user.id]);
   const tickets = await all('SELECT * FROM support_tickets WHERE user_id=? ORDER BY created_at DESC', [req.user.id]);
+  const topups = await all('SELECT * FROM balance_topups WHERE user_id=? ORDER BY created_at DESC', [req.user.id]);
   const messages = await all('SELECT m.*, t.title task_title, s.name sender_name, r.name receiver_name FROM messages m JOIN tasks t ON t.id=m.task_id JOIN users s ON s.id=m.sender_id JOIN users r ON r.id=m.receiver_id WHERE m.sender_id=? OR m.receiver_id=? ORDER BY m.created_at DESC', [req.user.id, req.user.id]);
-  res.json({ owned, assigned, apps, withdrawals, tickets, messages });
+  res.json({ owned, assigned, apps, withdrawals, tickets, topups, messages });
 });
 app.post('/api/withdrawals', auth, notBanned, async (req, res) => {
   const amount = parseInt(req.body.amount || 0); const { full_name, iban } = req.body;
@@ -334,11 +403,21 @@ app.post('/api/support', auth, notBanned, async (req, res) => {
   res.json({ message: 'Destek talebi gönderildi.' });
 });
 
-app.get('/api/admin/stats', auth, admin, async (req, res) => res.json({ users: (await get('SELECT COUNT(*) c FROM users')).c, tasks: (await get('SELECT COUNT(*) c FROM tasks')).c, payments: (await get('SELECT COUNT(*) c FROM payments')).c, volume: (await get('SELECT COALESCE(SUM(amount),0) c FROM payments WHERE status="paid"')).c, withdrawals: (await get('SELECT COUNT(*) c FROM withdrawals WHERE status="pending"')).c, disputes: (await get('SELECT COUNT(*) c FROM tasks WHERE status="dispute"')).c }));
+app.get('/api/admin/stats', auth, admin, async (req, res) => res.json({ users: (await get('SELECT COUNT(*) c FROM users')).c, tasks: (await get('SELECT COUNT(*) c FROM tasks')).c, payments: (await get('SELECT COUNT(*) c FROM payments')).c, volume: (await get('SELECT COALESCE(SUM(amount),0) c FROM payments WHERE status="paid"')).c, withdrawals: (await get('SELECT COUNT(*) c FROM withdrawals WHERE status="pending"')).c, disputes: (await get('SELECT COUNT(*) c FROM tasks WHERE status="dispute"')).c, topups: (await get('SELECT COUNT(*) c FROM balance_topups WHERE status="pending"')).c }));
 app.get('/api/admin/users', auth, admin, async (req, res) => res.json(await all('SELECT id,name,email,is_admin,balance,phone,email_verified,banned,rating_avg,rating_count,created_at FROM users ORDER BY created_at DESC')));
 app.get('/api/admin/tasks', auth, admin, async (req, res) => res.json(await all('SELECT t.*,u.name owner_name FROM tasks t LEFT JOIN users u ON u.id=t.owner_id ORDER BY t.created_at DESC')));
 app.get('/api/admin/withdrawals', auth, admin, async (req, res) => res.json(await all('SELECT w.*,u.name,u.email FROM withdrawals w JOIN users u ON u.id=w.user_id ORDER BY w.created_at DESC')));
 app.get('/api/admin/tickets', auth, admin, async (req, res) => res.json(await all('SELECT s.*,u.name,u.email FROM support_tickets s JOIN users u ON u.id=s.user_id ORDER BY s.created_at DESC')));
+app.get('/api/admin/topups', auth, admin, async (req, res) => res.json(await all('SELECT b.*,u.name,u.email,u.balance FROM balance_topups b JOIN users u ON u.id=b.user_id ORDER BY b.created_at DESC')));
+app.post('/api/admin/topups/:id', auth, admin, async (req, res) => {
+  const topup = await get('SELECT * FROM balance_topups WHERE id=?', [req.params.id]);
+  if (!topup) return res.status(404).json({ error: 'Bakiye bildirimi bulunamadı.' });
+  if (topup.status !== 'pending') return res.status(400).json({ error: 'Bu bildirim zaten sonuçlandırılmış.' });
+  const status = req.body.status === 'approved' ? 'approved' : 'rejected';
+  if (status === 'approved') await run('UPDATE users SET balance=balance+? WHERE id=?', [topup.amount, topup.user_id]);
+  await run('UPDATE balance_topups SET status=?,admin_note=? WHERE id=?', [status, req.body.admin_note || '', topup.id]);
+  res.json({ message: status === 'approved' ? `${topup.amount} TL kullanıcı bakiyesine eklendi.` : 'Bakiye bildirimi reddedildi.' });
+});
 app.post('/api/admin/users/:id/ban', auth, admin, async (req, res) => { await run('UPDATE users SET banned=? WHERE id=?', [req.body.banned ? 1 : 0, req.params.id]); res.json({ message: req.body.banned ? 'Kullanıcı banlandı.' : 'Ban kaldırıldı.' }); });
 app.post('/api/admin/tasks/:id/delete', auth, admin, async (req, res) => { await run('UPDATE tasks SET status="deleted" WHERE id=?', [req.params.id]); res.json({ message: 'Görev silindi/pasife alındı.' }); });
 app.post('/api/admin/tasks/:id/status', auth, admin, async (req, res) => { await run('UPDATE tasks SET status=? WHERE id=?', [req.body.status, req.params.id]); res.json({ message: 'Durum güncellendi.' }); });
