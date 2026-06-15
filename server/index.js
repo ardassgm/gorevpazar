@@ -258,7 +258,7 @@ app.get('/api/tasks/:id', async (req, res) => {
 });
 app.post('/api/tasks', auth, notBanned, async (req, res) => {
   const u = await get('SELECT email_verified FROM users WHERE id=?', [req.user.id]);
-  if (!u.email_verified) return res.status(403).json({ error: 'Görev açmak için önce e-postanı doğrula.' });
+  if (!u.email_verified && !req.user.is_admin) return res.status(403).json({ error: 'Görev açmak için önce e-postanı doğrula.' });
   const b = req.body; const badword = checkTask(b);
   if (badword) return res.status(400).json({ error: `Bu görev yayınlanamaz. Yasaklı içerik algılandı: ${badword}` });
 
@@ -267,10 +267,15 @@ app.post('/api/tasks', auth, notBanned, async (req, res) => {
   if (!b.title || !b.description) return res.status(400).json({ error: 'Başlık ve açıklama zorunlu.' });
   if (taskType === 'paid' && (!budget || budget < 50)) return res.status(400).json({ error: 'Ücretli görev için en az 50 TL bütçe girmelisiniz.' });
 
-  if (taskType === 'free') {
-    const today = await get(`SELECT COUNT(*) c FROM tasks WHERE owner_id=? AND task_type='free' AND date(created_at)=date('now','localtime')`, [req.user.id]);
-    if (today.c >= 1) return res.status(429).json({ error: 'Bugün ücretsiz görev oluşturma hakkınızı kullandınız. Yeni ücretsiz görev açmak için yarını bekleyebilir veya ücretli görev oluşturabilirsiniz.' });
+  if (taskType === 'free' && !req.user.is_admin) {
+  const today = await get(`SELECT COUNT(*) c FROM tasks WHERE owner_id=? AND task_type='free' AND date(created_at)=date('now','localtime')`, [req.user.id]);
+
+  if (today.c >= 1) {
+    return res.status(429).json({
+      error: 'Bugün ücretsiz görev oluşturma hakkınızı kullandınız. Yeni ücretsiz görev açmak için yarını bekleyebilir veya ücretli görev oluşturabilirsiniz.'
+    });
   }
+}
 
   const mediaData = b.media_data || '';
   if (mediaData && mediaData.length > 25 * 1024 * 1024) return res.status(413).json({ error: 'Medya dosyası çok büyük. Maksimum yaklaşık 18 MB dosya yükleyebilirsiniz.' });
@@ -421,7 +426,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
 app.post('/api/withdrawals', auth, notBanned, async (req, res) => {
   const amount = parseInt(req.body.amount || 0); const { full_name, iban } = req.body;
   const u = await get('SELECT balance,email_verified FROM users WHERE id=?', [req.user.id]);
-  if (!u.email_verified) return res.status(403).json({ error: 'Para çekmek için e-postanı doğrula.' });
+  if (!u.email_verified && !req.user.is_admin) return res.status(403).json({ error: 'Para çekmek için e-postanı doğrula.' });
   if (!amount || amount < 50) return res.status(400).json({ error: 'Minimum çekim 50 TL.' });
   if (amount > u.balance) return res.status(400).json({ error: 'Yetersiz bakiye.' });
   if (!full_name || !iban || !iban.startsWith('TR')) return res.status(400).json({ error: 'Ad soyad ve TR ile başlayan IBAN gerekli.' });
